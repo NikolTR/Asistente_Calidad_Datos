@@ -9,7 +9,6 @@ from pathlib import Path
 import sys
 import os
 
-# Agregar el directorio raíz al path para importaciones
 root_dir = Path(__file__).parent.parent
 sys.path.append(str(root_dir))
 

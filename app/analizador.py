@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import Dict, List, Any, Tuple
 import streamlit as st
+import re
 
 class AnalizadorCalidadDatos:
     """Clase principal para analizar la calidad de datos en Excel"""
@@ -68,10 +69,10 @@ class AnalizadorCalidadDatos:
             resultado_analisis["error"] = f"Error en análisis: {str(e)}"
             # Asegurar que siempre haya métricas por defecto
             resultado_analisis["metricas_calidad_detalladas"] = {
-                "completitud": 50.0,
-                "exactitud": 50.0,
-                "unicidad": 50.0,
-                "consistencia": 50.0
+                "completitud": 30.0,
+                "exactitud": 25.0,
+                "unicidad": 40.0,
+                "consistencia": 35.0
             }
         
         return resultado_analisis
@@ -117,17 +118,17 @@ class AnalizadorCalidadDatos:
             analisis["error"] = f"Error al analizar hoja {nombre_hoja}: {str(e)}"
             # Valores por defecto en caso de error
             analisis["metricas_calidad"] = {
-                "completitud": 50.0,
-                "exactitud": 50.0,
-                "unicidad": 50.0,
-                "consistencia": 50.0
+                "completitud": 30.0,
+                "exactitud": 25.0,
+                "unicidad": 40.0,
+                "consistencia": 35.0
             }
         
         return analisis
     
     def _calcular_metricas_calidad_hoja(self, df: pd.DataFrame) -> Dict[str, float]:
         """
-        Calcula métricas específicas de calidad para una hoja
+        Calcula métricas específicas de calidad para una hoja con validaciones más estrictas
         """
         metricas = {
             "completitud": 50.0,
@@ -140,54 +141,138 @@ class AnalizadorCalidadDatos:
             return metricas
         
         try:
-            # 1. COMPLETITUD - Porcentaje de datos no nulos
+            # 1. COMPLETITUD MEJORADA - Detecta valores nulos, vacíos y placeholders
             total_celdas = len(df) * len(df.columns)
-            celdas_con_datos = total_celdas - df.isnull().sum().sum()
-            metricas["completitud"] = (celdas_con_datos / total_celdas) * 100 if total_celdas > 0 else 100
+            celdas_problematicas = 0
             
-            # 2. EXACTITUD - Basado en tipos de datos y valores válidos
+            for col in df.columns:
+                for idx, valor in df[col].items():
+                    # Contar como problemático si:
+                    if pd.isna(valor):  # Nulo
+                        celdas_problematicas += 1
+                    elif isinstance(valor, str):
+                        valor_limpio = str(valor).strip()
+                        if (valor_limpio == '' or  # Vacío
+                            valor_limpio == '??' or  # Placeholder
+                            valor_limpio.lower() in ['n/a', 'na', 'null', 'none'] or  # Valores nulos textuales
+                            len(valor_limpio) == 0):  # Solo espacios
+                            celdas_problematicas += 1
+            
+            metricas["completitud"] = max(0, ((total_celdas - celdas_problematicas) / total_celdas) * 100) if total_celdas > 0 else 100
+            
+            # 2. EXACTITUD MEJORADA - Validaciones específicas por tipo de dato
             exactitud_scores = []
+            
             for col in df.columns:
                 col_score = 100.0
+                valores_no_nulos = df[col].dropna()
                 
-                if df[col].dtype == 'object':
-                    valores_no_nulos = df[col].dropna().astype(str)
-                    if len(valores_no_nulos) > 0:
-                        try:
-                            numericos = pd.to_numeric(valores_no_nulos, errors='coerce')
-                            porcentaje_numericos = numericos.notna().sum() / len(valores_no_nulos)
-                            if 0.3 < porcentaje_numericos < 0.9:
-                                col_score -= 30
-                        except:
-                            pass
-                        
-                        longitudes = valores_no_nulos.str.len()
-                        if longitudes.max() > 1000:
+                if len(valores_no_nulos) == 0:
+                    exactitud_scores.append(col_score)
+                    continue
+                
+                # Validaciones específicas según el nombre de la columna
+                col_lower = col.lower()
+                
+                # Validación de fechas
+                if 'fecha' in col_lower:
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip()
+                        if valor_str.lower() == 'hoy':  # Fecha inválida
                             col_score -= 20
+                        else:
+                            try:
+                                pd.to_datetime(valor_str, errors='raise')
+                            except:
+                                col_score -= 15
                 
-                elif df[col].dtype in ['int64', 'float64']:
-                    valores_numericos = df[col].dropna()
-                    if len(valores_numericos) > 3:
-                        Q1 = valores_numericos.quantile(0.25)
-                        Q3 = valores_numericos.quantile(0.75)
-                        IQR = Q3 - Q1
-                        if IQR > 0:
-                            outliers = valores_numericos[(valores_numericos < Q1 - 3*IQR) | (valores_numericos > Q3 + 3*IQR)]
-                            if len(outliers) > len(valores_numericos) * 0.1:
-                                col_score -= 25
+                # Validación de códigos/IDs
+                elif any(word in col_lower for word in ['codigo', 'id_']):
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip()
+                        if valor_str == '' or valor_str == '??':
+                            col_score -= 25
+                
+                # Validación de teléfonos/celulares
+                elif any(word in col_lower for word in ['telefono', 'celular']):
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip()
+                        if len(valor_str) > 12 or len(valor_str) < 7:  # Longitud anormal
+                            col_score -= 20
+                        elif not valor_str.isdigit():
+                            col_score -= 15
+                
+                # Validación de género
+                elif 'genero' in col_lower:
+                    valores_validos = ['masculino', 'femenino', 'otro']
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip().lower()
+                        if valor_str not in valores_validos and valor_str != '??':
+                            col_score -= 30
+                        elif valor_str == '??':
+                            col_score -= 40
+                
+                # Validación de emails
+                elif 'email' in col_lower or 'correo' in col_lower:
+                    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip()
+                        if not re.match(email_pattern, valor_str):
+                            col_score -= 25
+                
+                # Validación de sede/institución
+                elif any(word in col_lower for word in ['sede', 'institucion']):
+                    for valor in valores_no_nulos:
+                        valor_str = str(valor).strip()
+                        # Detectar errores tipográficos como "bUD" en lugar de "IUD"
+                        if len(valor_str) < 3 or any(c in valor_str for c in ['??', '@@']):
+                            col_score -= 30
+                
+                # Validación general de texto
+                if df[col].dtype == 'object':
+                    valores_str = valores_no_nulos.astype(str)
+                    for valor_str in valores_str:
+                        # Detectar caracteres raros o errores tipográficos
+                        if any(char in valor_str for char in ['??', '@@', '##']):
+                            col_score -= 15
+                        
+                        # Detectar longitudes anormales
+                        if len(valor_str) > 200:  # Muy largo
+                            col_score -= 10
                 
                 exactitud_scores.append(max(0, col_score))
             
             metricas["exactitud"] = np.mean(exactitud_scores) if exactitud_scores else 50
             
-            # 3. UNICIDAD - Porcentaje de registros únicos
+            # 3. UNICIDAD MEJORADA - Considera duplicados parciales
             if len(df) > 0:
+                # Duplicados completos
                 filas_unicas = len(df.drop_duplicates())
-                metricas["unicidad"] = (filas_unicas / len(df)) * 100
+                unicidad_completa = (filas_unicas / len(df)) * 100
+                
+                # Verificar duplicados en campos clave (como documento)
+                unicidad_campos_clave = 100.0
+                campos_clave = ['documento', 'id_estudiante', 'email']
+                
+                for campo in campos_clave:
+                    col_encontrada = None
+                    for col in df.columns:
+                        if campo.lower() in col.lower():
+                            col_encontrada = col
+                            break
+                    
+                    if col_encontrada and col_encontrada in df.columns:
+                        valores_campo = df[col_encontrada].dropna()
+                        if len(valores_campo) > 0:
+                            valores_unicos = len(valores_campo.drop_duplicates())
+                            porcentaje_unicos = (valores_unicos / len(valores_campo)) * 100
+                            unicidad_campos_clave = min(unicidad_campos_clave, porcentaje_unicos)
+                
+                metricas["unicidad"] = min(unicidad_completa, unicidad_campos_clave)
             else:
                 metricas["unicidad"] = 100
             
-            # 4. CONSISTENCIA - Uniformidad en tipos y formatos
+            # 4. CONSISTENCIA MEJORADA - Validaciones de formato y estructura
             consistencia_scores = []
             
             for col in df.columns:
@@ -200,41 +285,96 @@ class AnalizadorCalidadDatos:
                 if df[col].dtype == 'object':
                     valores_str = valores_no_nulos.astype(str)
                     
+                    # Verificar consistencia en formato de fechas
+                    if 'fecha' in col.lower() or 'periodo' in col.lower():
+                        formatos_encontrados = set()
+                        for valor in valores_str:
+                            valor = valor.strip()
+                            if '/' in valor:
+                                formatos_encontrados.add('dd/mm/yyyy')
+                            elif '-' in valor:
+                                formatos_encontrados.add('yyyy-mm-dd')
+                            elif valor.lower() == 'hoy':
+                                formatos_encontrados.add('texto')
+                            else:
+                                formatos_encontrados.add('otro')
+                        
+                        if len(formatos_encontrados) > 1:
+                            col_score -= 30
+                    
+                    # Verificar consistencia en códigos
+                    elif 'codigo' in col.lower() or col.lower().startswith('id'):
+                        longitudes = [len(str(v).strip()) for v in valores_str]
+                        if len(set(longitudes)) > 2:  # Más de 2 longitudes diferentes
+                            col_score -= 25
+                    
+                    # Verificar consistencia general de formato
                     if len(valores_str) > 1:
-                        mayusculas = valores_str.str.isupper().sum()
-                        minusculas = valores_str.str.islower().sum()
+                        # Verificar mayúsculas/minúsculas
+                        mayusculas = sum(1 for v in valores_str if str(v).isupper())
+                        minusculas = sum(1 for v in valores_str if str(v).islower())
                         if mayusculas > 0 and minusculas > 0:
                             inconsistencia = min(mayusculas, minusculas) / len(valores_str)
-                            if inconsistencia > 0.1:
-                                col_score -= 20
+                            if inconsistencia > 0.2:  # Más estricto
+                                col_score -= 25
                         
-                        con_espacios_inicio = valores_str.str.startswith(' ').sum()
-                        con_espacios_final = valores_str.str.endswith(' ').sum()
-                        if con_espacios_inicio > 0 or con_espacios_final > 0:
+                        # Verificar espacios al inicio/final
+                        con_espacios = sum(1 for v in valores_str if str(v) != str(v).strip())
+                        if con_espacios > len(valores_str) * 0.1:
+                            col_score -= 20
+                        
+                        # Verificar caracteres especiales inconsistentes
+                        con_caracteres_especiales = sum(1 for v in valores_str if any(c in str(v) for c in ['@', '#', '$', '%']))
+                        if con_caracteres_especiales > 0 and con_caracteres_especiales < len(valores_str):
                             col_score -= 15
                 
                 consistencia_scores.append(max(0, col_score))
             
             metricas["consistencia"] = np.mean(consistencia_scores) if consistencia_scores else 50
             
+            # Aplicar penalizaciones adicionales por problemas graves detectados
+            problemas_graves = 0
+            
+            # Buscar errores tipográficos evidentes en toda la tabla
+            for col in df.columns:
+                for valor in df[col].dropna():
+                    valor_str = str(valor).strip()
+                    # Detectar patrones de error comunes
+                    if any(patron in valor_str for patron in ['bUD', 'j025', 'x025', 'n025']):
+                        problemas_graves += 1
+                    elif valor_str == 'hoy' and 'fecha' in col.lower():
+                        problemas_graves += 1
+                    elif '999999999999999' in valor_str:  # Números excesivamente largos
+                        problemas_graves += 1
+            
+            # Aplicar penalización proporcional
+            if problemas_graves > 0:
+                factor_penalizacion = min(0.5, problemas_graves / (len(df) * 0.1))  # Máximo 50% de penalización
+                for metrica in metricas:
+                    metricas[metrica] *= (1 - factor_penalizacion)
+        
         except Exception as e:
-            # En caso de error, devolver valores neutros
+            # En caso de error, devolver valores que reflejen problemas
             metricas = {
-                "completitud": 50.0,
-                "exactitud": 50.0,
-                "unicidad": 50.0,
-                "consistencia": 50.0
+                "completitud": 30.0,
+                "exactitud": 25.0,
+                "unicidad": 40.0,
+                "consistencia": 35.0
             }
+        
+        # Asegurar que todas las métricas estén en el rango 0-100
+        for key in metricas:
+            metricas[key] = max(0.0, min(100.0, metricas[key]))
         
         return metricas
     
     def _calcular_metricas_calidad_detalladas(self, analisis_hojas: Dict[str, Any]) -> Dict[str, float]:
         """Calcula métricas de calidad agregadas de todas las hojas"""
         metricas_consolidadas = {
-            "completitud": 50.0,
-            "exactitud": 50.0,
-            "unicidad": 50.0,
-            "consistencia": 50.0
+            "completitud": 30.0,
+            "exactitud": 25.0,
+            "unicidad": 40.0,
+            "consistencia": 35.0
         }
         
         try:
@@ -246,8 +386,8 @@ class AnalizadorCalidadDatos:
             
             if metricas_por_hoja:
                 for criterio in ["completitud", "exactitud", "unicidad", "consistencia"]:
-                    valores = [m.get(criterio, 50.0) for m in metricas_por_hoja]
-                    metricas_consolidadas[criterio] = np.mean(valores) if valores else 50.0
+                    valores = [m.get(criterio, 30.0) for m in metricas_por_hoja]
+                    metricas_consolidadas[criterio] = np.mean(valores) if valores else 30.0
         
         except Exception as e:
             pass  # Mantener valores por defecto
@@ -255,26 +395,227 @@ class AnalizadorCalidadDatos:
         return metricas_consolidadas
     
     def _detectar_problemas_hoja(self, df: pd.DataFrame, nombre_hoja: str) -> List[Dict[str, Any]]:
-        """Detecta problemas específicos en una hoja"""
+        """Detecta problemas específicos en una hoja con validaciones más detalladas"""
         problemas = []
         
         try:
-            # Problema 1: Muchos valores nulos
+            # 1. Valores nulos y vacíos por columna
             for columna in df.columns:
                 if len(df) > 0:
-                    porcentaje_nulos = (df[columna].isnull().sum() / len(df)) * 100
-                    if porcentaje_nulos > 50:
+                    # Contar diferentes tipos de problemas
+                    nulos_reales = df[columna].isnull().sum()
+                    valores_vacios = 0
+                    valores_placeholder = 0
+                    
+                    for valor in df[columna].dropna():
+                        valor_str = str(valor).strip()
+                        if valor_str == '' or len(valor_str) == 0:
+                            valores_vacios += 1
+                        elif valor_str in ['??', 'N/A', 'na', 'null']:
+                            valores_placeholder += 1
+                    
+                    total_problemas = nulos_reales + valores_vacios + valores_placeholder
+                    if total_problemas > 0:
+                        porcentaje_problemas = (total_problemas / len(df)) * 100
+                        if porcentaje_problemas > 10:  # Más estricto
+                            severidad = "alta" if porcentaje_problemas > 30 else "media"
+                            problemas.append({
+                                "tipo": "datos_faltantes_o_invalidos",
+                                "descripcion": f"Columna '{columna}': {total_problemas} valores problemáticos ({porcentaje_problemas:.1f}%)",
+                                "severidad": severidad,
+                                "columna": columna,
+                                "valor": porcentaje_problemas,
+                                "detalles": {
+                                    "nulos": nulos_reales,
+                                    "vacios": valores_vacios,
+                                    "placeholders": valores_placeholder
+                                }
+                            })
+            
+            # 2. Errores tipográficos específicos
+            errores_tipograficos = []
+            patrones_error = {
+                'bUD': 'IUD',
+                'j025-1': '2025-1',
+                'x025-1': '2025-1',
+                'n025-1': '2025-1',
+                'i025-1': '2025-1',
+                'hoy': 'fecha específica',
+                'tISNEROS': 'CISNEROS',
+                'µ': 'A',
+                '¢': 'o',
+                '‚': 'e'
+            }
+            
+            for columna in df.columns:
+                for idx, valor in df[columna].items():
+                    if pd.notna(valor):
+                        valor_str = str(valor)
+                        for patron, correccion in patrones_error.items():
+                            if patron in valor_str:
+                                errores_tipograficos.append({
+                                    "fila": idx,
+                                    "columna": columna,
+                                    "valor_actual": valor_str,
+                                    "patron_error": patron,
+                                    "sugerencia": valor_str.replace(patron, correccion)
+                                })
+            
+            if errores_tipograficos:
+                problemas.append({
+                    "tipo": "errores_tipograficos",
+                    "descripcion": f"{len(errores_tipograficos)} errores tipográficos detectados",
+                    "severidad": "alta",
+                    "valor": len(errores_tipograficos),
+                    "ejemplos": errores_tipograficos[:5]  # Mostrar solo los primeros 5
+                })
+            
+            # 3. Valores de longitud anormal
+            for columna in df.columns:
+                if 'telefono' in columna.lower() or 'celular' in columna.lower():
+                    valores_anormales = []
+                    for idx, valor in df[columna].items():
+                        if pd.notna(valor):
+                            valor_str = str(valor).strip()
+                            if len(valor_str) > 12 or len(valor_str) < 7:
+                                valores_anormales.append({
+                                    "fila": idx,
+                                    "valor": valor_str,
+                                    "longitud": len(valor_str)
+                                })
+                    
+                    if valores_anormales:
                         problemas.append({
-                            "tipo": "valores_nulos_excesivos",
-                            "descripcion": f"Columna '{columna}' tiene {porcentaje_nulos:.1f}% valores nulos",
-                            "severidad": "alta",
+                            "tipo": "longitud_telefono_anormal",
+                            "descripcion": f"Columna '{columna}': {len(valores_anormales)} números con longitud anormal",
+                            "severidad": "media",
                             "columna": columna,
-                            "valor": porcentaje_nulos
+                            "valor": len(valores_anormales),
+                            "ejemplos": valores_anormales[:3]
                         })
             
-            # Problema 2: Filas completamente vacías
+            # 4. Inconsistencias en códigos obligatorios
+            campos_obligatorios = ['codigo programa', 'codigo_programa', 'id_estudiante']
+            for campo_obligatorio in campos_obligatorios:
+                columna_encontrada = None
+                for col in df.columns:
+                    if campo_obligatorio.lower().replace('_', ' ') in col.lower().replace('_', ' '):
+                        columna_encontrada = col
+                        break
+                
+                if columna_encontrada:
+                    valores_faltantes = 0
+                    for valor in df[columna_encontrada]:
+                        if pd.isna(valor) or str(valor).strip() == '':
+                            valores_faltantes += 1
+                    
+                    if valores_faltantes > 0:
+                        problemas.append({
+                            "tipo": "campo_obligatorio_faltante",
+                            "descripcion": f"Campo obligatorio '{columna_encontrada}' tiene {valores_faltantes} valores faltantes",
+                            "severidad": "alta",
+                            "columna": columna_encontrada,
+                            "valor": valores_faltantes
+                        })
+            
+            # 5. Duplicados en campos únicos
+            campos_unicos = ['documento', 'id_estudiante', 'email']
+            for campo_unico in campos_unicos:
+                columna_encontrada = None
+                for col in df.columns:
+                    if campo_unico.lower() in col.lower():
+                        columna_encontrada = col
+                        break
+                
+                if columna_encontrada:
+                    valores_validos = df[columna_encontrada].dropna()
+                    if len(valores_validos) > 0:
+                        duplicados = valores_validos.duplicated().sum()
+                        if duplicados > 0:
+                            problemas.append({
+                                "tipo": "duplicados_en_campo_unico",
+                                "descripcion": f"Campo único '{columna_encontrada}' tiene {duplicados} valores duplicados",
+                                "severidad": "alta",
+                                "columna": columna_encontrada,
+                                "valor": duplicados
+                            })
+            
+            # 6. Valores imposibles en fecha de nacimiento (edades)
+            col_fecha_nacimiento = None
+            for col in df.columns:
+                if 'fecha' in col.lower() and 'nacimiento' in col.lower():
+                    col_fecha_nacimiento = col
+                    break
+            
+            if col_fecha_nacimiento:
+                edades_imposibles = []
+                fecha_actual = pd.Timestamp.now()
+                
+                for idx, valor in df[col_fecha_nacimiento].items():
+                    if pd.notna(valor):
+                        try:
+                            fecha_nac = pd.to_datetime(str(valor), errors='coerce')
+                            if pd.notna(fecha_nac):
+                                edad = (fecha_actual - fecha_nac).days / 365.25
+                                if edad < 15 or edad > 80:  # Edades improbables para estudiantes
+                                    edades_imposibles.append({
+                                        "fila": idx,
+                                        "fecha_nacimiento": str(valor),
+                                        "edad_calculada": round(edad, 1)
+                                    })
+                        except:
+                            pass
+                
+                if edades_imposibles:
+                    problemas.append({
+                        "tipo": "edades_improbables",
+                        "descripcion": f"{len(edades_imposibles)} estudiantes con edades improbables",
+                        "severidad": "media",
+                        "columna": col_fecha_nacimiento,
+                        "valor": len(edades_imposibles),
+                        "ejemplos": edades_imposibles[:3]
+                    })
+            
+            # 7. Emails malformados
+            col_email = None
+            for col in df.columns:
+                if 'email' in col.lower() or 'correo' in col.lower():
+                    col_email = col
+                    break
+            
+            if col_email:
+                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                emails_invalidos = []
+                
+                for idx, valor in df[col_email].items():
+                    if pd.notna(valor):
+                        valor_str = str(valor).strip()
+                        if not re.match(email_pattern, valor_str):
+                            emails_invalidos.append({
+                                "fila": idx,
+                                "email": valor_str
+                            })
+                
+                if emails_invalidos:
+                    problemas.append({
+                        "tipo": "emails_malformados",
+                        "descripcion": f"{len(emails_invalidos)} emails con formato inválido",
+                        "severidad": "media",
+                        "columna": col_email,
+                        "valor": len(emails_invalidos),
+                        "ejemplos": emails_invalidos[:5]
+                    })
+            
+            # 8. Filas completamente vacías (ya existente pero mejorado)
             if len(df) > 0:
                 filas_vacias = df.isnull().all(axis=1).sum()
+                filas_casi_vacias = 0
+                
+                for idx, fila in df.iterrows():
+                    valores_no_nulos = fila.dropna()
+                    if len(valores_no_nulos) <= 2:  # Menos de 3 campos completados
+                        filas_casi_vacias += 1
+                
                 if filas_vacias > 0:
                     problemas.append({
                         "tipo": "filas_vacias",
@@ -282,30 +623,21 @@ class AnalizadorCalidadDatos:
                         "severidad": "media",
                         "valor": filas_vacias
                     })
-            
-            # Problema 3: Duplicados excesivos
-            if len(df) > 0:
-                porcentaje_duplicados = (df.duplicated().sum() / len(df)) * 100
-                if porcentaje_duplicados > 10:
+                
+                if filas_casi_vacias > 0:
                     problemas.append({
-                        "tipo": "duplicados_excesivos",
-                        "descripcion": f"{porcentaje_duplicados:.1f}% de filas duplicadas",
-                        "severidad": "alta",
-                        "valor": porcentaje_duplicados
-                    })
-            
-            # Problema 4: Nombres de columnas problemáticos
-            for columna in df.columns:
-                if pd.isna(columna) or str(columna).startswith("Unnamed"):
-                    problemas.append({
-                        "tipo": "nombres_columnas_invalidos",
-                        "descripcion": f"Columna sin nombre válido: '{columna}'",
+                        "tipo": "filas_casi_vacias",
+                        "descripcion": f"{filas_casi_vacias} filas con muy pocos datos (≤2 campos)",
                         "severidad": "media",
-                        "columna": columna
+                        "valor": filas_casi_vacias
                     })
         
         except Exception as e:
-            pass  # En caso de error, devolver lista vacía
+            problemas.append({
+                "tipo": "error_analisis",
+                "descripcion": f"Error durante el análisis: {str(e)}",
+                "severidad": "alta"
+            })
         
         return problemas
     
@@ -342,7 +674,7 @@ class AnalizadorCalidadDatos:
             "total_columnas": 0,
             "total_problemas": 0,
             "problemas_por_severidad": {"alta": 0, "media": 0, "baja": 0},
-            "calidad_promedio": 50
+            "calidad_promedio": 30
         }
         
         try:
@@ -358,8 +690,17 @@ class AnalizadorCalidadDatos:
                             resumen["problemas_por_severidad"][severidad] += 1
             
             if resumen["total_hojas_analizadas"] > 0:
+                # Cálculo más estricto de calidad promedio
                 problemas_por_hoja = resumen["total_problemas"] / resumen["total_hojas_analizadas"]
-                resumen["calidad_promedio"] = max(0, 100 - (problemas_por_hoja * 10))
+                problemas_altos = resumen["problemas_por_severidad"]["alta"]
+                problemas_medios = resumen["problemas_por_severidad"]["media"]
+                
+                # Penalización más severa por problemas
+                penalizacion_alta = problemas_altos * 15  # 15 puntos por problema alto
+                penalizacion_media = problemas_medios * 8  # 8 puntos por problema medio
+                penalizacion_total = penalizacion_alta + penalizacion_media
+                
+                resumen["calidad_promedio"] = max(0, 100 - penalizacion_total)
         
         except Exception as e:
             pass
@@ -367,18 +708,40 @@ class AnalizadorCalidadDatos:
         return resumen
     
     def _calcular_puntuacion_calidad(self, resultado_analisis: Dict[str, Any]) -> float:
-        """Calcula puntuación de calidad del 0 al 100"""
+        """Calcula puntuación de calidad del 0 al 100 con criterios más estrictos"""
         try:
             if "metricas_calidad_detalladas" in resultado_analisis:
                 metricas = resultado_analisis["metricas_calidad_detalladas"]
-                puntuacion = (metricas["completitud"] + metricas["exactitud"] + 
-                            metricas["unicidad"] + metricas["consistencia"]) / 4
+                
+                # Ponderación más estricta
+                completitud_peso = 0.3
+                exactitud_peso = 0.35  # Mayor peso a exactitud
+                unicidad_peso = 0.15
+                consistencia_peso = 0.2
+                
+                puntuacion = (
+                    metricas["completitud"] * completitud_peso +
+                    metricas["exactitud"] * exactitud_peso + 
+                    metricas["unicidad"] * unicidad_peso +
+                    metricas["consistencia"] * consistencia_peso
+                )
+                
+                # Aplicar penalización adicional por número total de problemas
+                resumen_general = resultado_analisis.get("resumen_general", {})
+                total_problemas = resumen_general.get("total_problemas", 0)
+                problemas_altos = resumen_general.get("problemas_por_severidad", {}).get("alta", 0)
+                
+                # Penalización extra por problemas críticos
+                if problemas_altos > 0:
+                    penalizacion_critica = min(30, problemas_altos * 5)  # Max 30% penalización
+                    puntuacion *= (1 - penalizacion_critica / 100)
+                
                 return max(0, min(100, puntuacion))
             
-            return 50.0
+            return 30.0
             
         except:
-            return 50.0
+            return 30.0
     
     def _generar_graficos_analisis(self, info_archivo: Dict[str, Any], resultado_analisis: Dict[str, Any]) -> Dict[str, Any]:
         """Genera gráficos para visualizar el análisis"""
@@ -406,10 +769,10 @@ class AnalizadorCalidadDatos:
         """
         try:
             metricas = resultado_analisis.get("metricas_calidad_detalladas", {
-                "completitud": 50.0,
-                "exactitud": 50.0,
-                "unicidad": 50.0,
-                "consistencia": 50.0
+                "completitud": 30.0,
+                "exactitud": 25.0,
+                "unicidad": 40.0,
+                "consistencia": 35.0
             })
             
             # Calcular porcentajes de no cumplimiento
@@ -676,25 +1039,37 @@ class AnalizadorCalidadDatos:
     def _grafico_calidad_general(self, resultado_analisis: Dict[str, Any]) -> go.Figure:
         """Medidor de calidad general"""
         try:
-            puntuacion = resultado_analisis.get("puntuacion_calidad", 50)
+            puntuacion = resultado_analisis.get("puntuacion_calidad", 30)
+            
+            # Determinar color basado en puntuación
+            if puntuacion >= 80:
+                color_bar = "green"
+            elif puntuacion >= 60:
+                color_bar = "yellow"
+            elif puntuacion >= 40:
+                color_bar = "orange"
+            else:
+                color_bar = "red"
             
             fig = go.Figure(go.Indicator(
                 mode = "gauge+number+delta",
                 value = puntuacion,
                 domain = {'x': [0, 1], 'y': [0, 1]},
                 title = {'text': "Puntuación de Calidad"},
-                delta = {'reference': 80},
+                delta = {'reference': 70, 'increasing': {'color': "green"}},
                 gauge = {
                     'axis': {'range': [None, 100]},
-                    'bar': {'color': "darkblue"},
+                    'bar': {'color': color_bar},
                     'steps': [
-                        {'range': [0, 50], 'color': "lightgray"},
-                        {'range': [50, 80], 'color': "gray"}
+                        {'range': [0, 40], 'color': "lightcoral"},
+                        {'range': [40, 60], 'color': "lightyellow"},
+                        {'range': [60, 80], 'color': "lightgreen"},
+                        {'range': [80, 100], 'color': "darkgreen"}
                     ],
                     'threshold': {
                         'line': {'color': "red", 'width': 4},
                         'thickness': 0.75,
-                        'value': 90
+                        'value': 70
                     }
                 }
             ))
@@ -783,9 +1158,6 @@ class AnalizadorCalidadDatos:
                 '#2F4858'   # Azul oscuro para complejos
             ]
             
-            # Calcular porcentajes
-            porcentajes = [(cantidad/total_columnas)*100 for cantidad in tipos_ordenados.values()]
-            
             # Crear el gráfico circular simple y limpio
             fig = go.Figure(data=[go.Pie(
                 labels=list(tipos_ordenados.keys()),
@@ -871,10 +1243,10 @@ RESUMEN DE ANÁLISIS:
 - Puntuación de calidad: {resultado_analisis.get('puntuacion_calidad', 0):.1f}/100
 
 MÉTRICAS DE CALIDAD ESPECÍFICAS:
-- Completitud: {metricas_calidad.get('completitud', 50):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('completitud', 50):.1f}%)
-- Exactitud: {metricas_calidad.get('exactitud', 50):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('exactitud', 50):.1f}%)
-- Unicidad: {metricas_calidad.get('unicidad', 50):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('unicidad', 50):.1f}%)
-- Consistencia: {metricas_calidad.get('consistencia', 50):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('consistencia', 50):.1f}%)
+- Completitud: {metricas_calidad.get('completitud', 30):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('completitud', 30):.1f}%)
+- Exactitud: {metricas_calidad.get('exactitud', 25):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('exactitud', 25):.1f}%)
+- Unicidad: {metricas_calidad.get('unicidad', 40):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('unicidad', 40):.1f}%)
+- Consistencia: {metricas_calidad.get('consistencia', 35):.1f}% (% de no cumplimiento: {100-metricas_calidad.get('consistencia', 35):.1f}%)
 
 PROBLEMAS DETALLADOS POR HOJA:
 """
